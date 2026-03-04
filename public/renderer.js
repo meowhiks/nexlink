@@ -890,7 +890,7 @@ async function connectToServer() {
       const text = legacy?.text;
       const id = legacy?.id || msg.id;
       if (!text) return;
-      storeAndShowMessage(uid, { id, text, sender: senderHidden, time: msg.time, me: senderHidden === myHiddenId });
+      storeAndShowMessage(uid, { id, serverId: msg.id, text, sender: senderHidden, time: msg.time, me: senderHidden === myHiddenId });
 
       // Delivery confirmation: if server echoed our message, mark as delivered
       if (senderHidden === myHiddenId && id) {
@@ -1123,7 +1123,8 @@ function storeAndShowMessage(uid, msgObj) {
     tab = { peer, messages:[], connected:false };
     chatTabs.set(uid, tab);
   }
-  if (msgObj.id && tab.messages.some(m => m.id === msgObj.id)) return;
+  if (msgObj?.id && tab.messages.some(m => m?.id === msgObj.id)) return;
+  if (msgObj?.serverId != null && tab.messages.some(m => m?.serverId === msgObj.serverId)) return;
   // Default status for outgoing messages loaded from server/history
   if (msgObj.me && !msgObj.status) msgObj.status = 'delivered';
   tab.messages.push(msgObj);
@@ -1142,18 +1143,26 @@ function fetchChatHistoryFromServer(uid) {
       tab = { peer, messages:[], connected:false };
       chatTabs.set(uid, tab);
     }
-    const ids = new Set(tab.messages.map(m => m.id).filter(Boolean));
+    const ids = new Set(tab.messages.map(m => m?.id).filter(Boolean));
+    const serverIds = new Set(tab.messages.map(m => m?.serverId).filter(v => v != null));
     serverMessages.forEach(m => {
-      if (m.id && ids.has(m.id)) return;
+      if (m?.id != null && serverIds.has(m.id)) return;
       let text = m.text;
       if (!text && m.ciphertext && window.NexLinkCrypto?.decodeLegacyPayload) {
         const legacy = window.NexLinkCrypto.decodeLegacyPayload(m.ciphertext, m.iv);
         if (legacy) text = legacy.text;
       }
       if (!text) return;
-      if (m.id) ids.add(m.id);
+      let stableId = m.id;
+      if (m.ciphertext && window.NexLinkCrypto?.decodeLegacyPayload) {
+        const legacy = window.NexLinkCrypto.decodeLegacyPayload(m.ciphertext, m.iv);
+        if (legacy?.id) stableId = legacy.id;
+      }
+      if (stableId && ids.has(stableId)) return;
+      if (stableId) ids.add(stableId);
+      if (m?.id != null) serverIds.add(m.id);
       const me = (m.sender === myHiddenId);
-      tab.messages.push({ id: m.id, text, sender: m.sender, time: m.time, me, status: me ? 'delivered' : undefined });
+      tab.messages.push({ id: stableId, serverId: m.id, text, sender: m.sender, time: m.time, me, status: me ? 'delivered' : undefined });
     });
     tab.messages.sort((a, b) => {
       const ta = (a && a.time) ? String(a.time) : '';
@@ -1617,13 +1626,29 @@ function sendMessage() {
   const msgId = 'm_' + Date.now() + '_' + Math.random().toString(36).slice(2);
   const msgObj = { id: msgId, text, me: true, sender: myHiddenId, time: timeStr(), status: 'pending' };
   const peerKey = activePeer.hiddenId || activePeer.userId;
-  const tab = chatTabs.get(peerKey);
-  if (tab) { tab.messages.push(msgObj); persistChatTabs(); }
+  let tab = chatTabs.get(peerKey);
+  if (!tab) {
+    chatTabs.set(peerKey, { peer: activePeer, messages: [], connected: false });
+    tab = chatTabs.get(peerKey);
+  }
+  tab.messages.push(msgObj);
+  persistChatTabs();
 
   let ciphertext = '';
-  try { ciphertext = btoa(JSON.stringify({ text, id: msgId })); } catch { ciphertext = ''; }
+  try {
+    ciphertext = window.NexLinkCrypto?.encodeLegacyPayload
+      ? window.NexLinkCrypto.encodeLegacyPayload({ text, id: msgId })
+      : btoa(JSON.stringify({ text, id: msgId }));
+  } catch { ciphertext = ''; }
   const ivBytes = new Uint8Array(12);
   const iv = btoa(String.fromCharCode(...ivBytes));
+  if (!ciphertext) {
+    toast('✗ Не удалось закодировать сообщение (попробуйте без спец-символов)');
+    appendMessageEl(text, true, myHiddenId, msgObj.time, msgId, msgObj.status);
+    msgInput.value = '';
+    msgInput.style.height = 'auto';
+    return;
+  }
   socket?.emit?.('chat-send', { roomType: 'dm', roomId: peerKey, to: peerKey, ciphertext, iv, clientMsgId: msgId }, (ack) => {
     if (ack?.ok) setMessageStatus(peerKey, msgId, 'delivered');
   });
