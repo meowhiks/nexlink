@@ -113,6 +113,15 @@ let autoConnectInFlight = false;
 let serverBaseUrl = '';
 let currentServerKey = null;
 
+// ── Reconnect loop (keeps trying forever) ───────────────────
+let reconnectTimer = null;
+let reconnectAttempt = 0;
+let connectInFlight = false;
+
+// ── Chat receipts state ─────────────────────────────────────
+// Track which incoming messageIds we've already reported as "read"
+const readSentIds = new Set();
+
 let callOverlayDetached = false;
 let callOverlayUnsubOpened = null;
 let callOverlayUnsubClosed = null;
@@ -608,6 +617,33 @@ function quickReconnectByPort() {
   connectToServer();
 }
 
+function clearReconnectLoop() {
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  reconnectAttempt = 0;
+}
+
+function scheduleReconnectLoop(reason) {
+  if (userConfig.autoConnect === false) return;
+  if (socket?.connected) return;
+  if (connectInFlight) return;
+  if (reconnectTimer) return;
+  try { window.electronAPI?.scanDiscovery?.(); } catch {}
+  serverStatusTxt.textContent = 'переподключение...';
+  // If socket.io instance exists, let it handle reconnection
+  if (socket && typeof socket.connect === 'function') {
+    try { socket.connect(); } catch {}
+    return;
+  }
+  // Exponential backoff up to 15s
+  const delay = Math.min(15000, Math.round(1000 * Math.pow(1.6, reconnectAttempt)));
+  reconnectAttempt++;
+  serverStatusTxt.textContent = `переподключение через ${Math.ceil(delay / 1000)}с...`;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connectToServer().catch(() => {});
+  }, delay);
+}
+
 async function ensureLocalServerAndConnect() {
   if (autoConnectInFlight) return;
   autoConnectInFlight = true;
@@ -634,6 +670,10 @@ async function connectToServer() {
   const serverIp  = serverIpInp?.value.trim()   || '127.0.0.1';
   const port      = Number(serverPortInp?.value.trim() || 7345) || 7345;
   const serverUrl = `http://${serverIp}:${port}`;
+
+  if (connectInFlight) return;
+  connectInFlight = true;
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
 
   currentServerKey = `${serverIp}:${port}`;
   const hidKey = `nexlink-hidden-id-${currentServerKey}`;
@@ -669,18 +709,37 @@ async function connectToServer() {
   serverStatusTxt.textContent = 'подключение...';
   tbStatus.classList.remove('connected');
 
-  loadScript(`http://${serverIp}:${port}/socket.io/socket.io.js`, () => {
+  loadScript(`http://${serverIp}:${port}/socket.io/socket.io.js`, (err) => {
+    if (err) {
+      connectInFlight = false;
+      tbStatus.classList.remove('connected');
+      if (connectBtn) connectBtn.disabled = false;
+      scheduleReconnectLoop('script_load_failed');
+      return;
+    }
     if (typeof io !== 'function') {
       serverStatusTxt.textContent = 'socket.io не загружен';
       tbStatus.classList.remove('connected');
       if (connectBtn) connectBtn.disabled = false;
       toast('✗ Не удалось подключиться: socket.io не загружен с сервера');
+      connectInFlight = false;
+      scheduleReconnectLoop('io_missing');
       return;
     }
-    socket = io(serverUrl, { transports: ['websocket'], timeout: 6000 });
+    socket = io(serverUrl, {
+      transports: ['websocket'],
+      timeout: 6000,
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 800,
+      reconnectionDelayMax: 5000,
+      randomizationFactor: 0.35,
+    });
     serverBaseUrl = serverUrl;
 
     socket.on('connect', () => {
+      connectInFlight = false;
+      clearReconnectLoop();
       serverStatusTxt.textContent = `${serverIp}:${port}`;
       tbStatus.classList.add('connected');
       if (connectBtn) connectBtn.disabled = false;
@@ -712,6 +771,8 @@ async function connectToServer() {
       tbStatus.classList.remove('connected');
       if (connectBtn) connectBtn.disabled = false;
       toast('✗ Не удалось подключиться к серверу');
+      connectInFlight = false;
+      scheduleReconnectLoop('connect_error');
     });
 
     socket.on('disconnect', () => {
@@ -730,6 +791,8 @@ async function connectToServer() {
       dataChannels = {};
       renderServerTabs();
       renderSidebar();
+      connectInFlight = false;
+      scheduleReconnectLoop('disconnect');
     });
 
     socket.on('peers-update', (peers) => {
@@ -829,6 +892,16 @@ async function connectToServer() {
       if (!text) return;
       storeAndShowMessage(uid, { id, text, sender: senderHidden, time: msg.time, me: senderHidden === myHiddenId });
 
+      // Delivery confirmation: if server echoed our message, mark as delivered
+      if (senderHidden === myHiddenId && id) {
+        setMessageStatus(uid, id, 'delivered');
+      }
+
+      // Read receipt: if we're currently viewing this chat, mark incoming as read
+      if (senderHidden !== myHiddenId && activePeerKey() === uid) {
+        sendReadReceiptsForActiveChat();
+      }
+
       // Windows toast notification for incoming messages (when not focused)
       try {
         if (senderHidden !== myHiddenId && window.electronAPI?.notifyMessage) {
@@ -836,6 +909,13 @@ async function connectToServer() {
           window.electronAPI.notifyMessage({ title, body: text });
         }
       } catch {}
+    });
+
+    socket.on('chat-read', ({ roomType, peerHiddenId, messageIds } = {}) => {
+      if (roomType && roomType !== 'dm') return;
+      const uid = normalizePeerKey(peerHiddenId);
+      if (!uid || !Array.isArray(messageIds)) return;
+      for (const mid of messageIds) setMessageStatus(uid, mid, 'read');
     });
   });
 }
@@ -847,10 +927,14 @@ function resolveAvatarUrl(url) {
 }
 
 function loadScript(src, cb) {
-  if (document.querySelector(`script[src="${src}"]`)) { cb(); return; }
+  if (document.querySelector(`script[src="${src}"]`)) { cb?.(null); return; }
   const s = document.createElement('script');
-  s.src = src; s.onload = cb;
-  s.onerror = () => toast('✗ Не удалось загрузить socket.io с сервера');
+  s.src = src;
+  s.onload = () => cb?.(null);
+  s.onerror = () => {
+    toast('✗ Не удалось загрузить socket.io с сервера');
+    cb?.(new Error('socket.io script load failed'));
+  };
   document.head.appendChild(s);
 }
 
@@ -983,6 +1067,55 @@ function activePeerKey() {
   return activePeer ? (activePeer.hiddenId || activePeer.userId) : null;
 }
 
+function normalizeMsgStatus(status) {
+  if (status === 'pending' || status === 'delivered' || status === 'read') return status;
+  return null;
+}
+
+function statusGlyph(status) {
+  switch (status) {
+    case 'pending':   return '○';
+    case 'delivered': return '✓';
+    case 'read':      return '✓✓';
+    default:          return '';
+  }
+}
+
+function setMessageStatus(uid, msgId, status) {
+  const st = normalizeMsgStatus(status);
+  if (!uid || !msgId || !st) return;
+  const tab = chatTabs.get(uid);
+  if (!tab?.messages?.length) return;
+  const m = tab.messages.find(x => x?.id === msgId && x?.me);
+  if (!m) return;
+  const cur = normalizeMsgStatus(m.status);
+  const rank = { pending: 0, delivered: 1, read: 2 };
+  if (cur && rank[cur] >= rank[st]) return;
+  m.status = st;
+  persistChatTabs();
+  if (activePeerKey() === uid) {
+    const el = messagesEl?.querySelector?.(`.msg[data-msg-id="${CSS.escape(String(msgId))}"] .msg-status`);
+    if (el) el.textContent = statusGlyph(st);
+  }
+}
+
+function sendReadReceiptsForActiveChat() {
+  const uid = activePeerKey();
+  if (!uid || !socket?.connected) return;
+  const tab = chatTabs.get(uid);
+  if (!tab?.messages?.length) return;
+  const ids = [];
+  for (const m of tab.messages) {
+    if (!m || m.me) continue;
+    if (!m.id) continue;
+    const key = `${uid}:${m.id}`;
+    if (readSentIds.has(key)) continue;
+    readSentIds.add(key);
+    ids.push(m.id);
+  }
+  if (!ids.length) return;
+  socket.emit('chat-read', { peerHiddenId: uid, messageIds: ids });
+}
 function storeAndShowMessage(uid, msgObj) {
   let tab = chatTabs.get(uid);
   if (!tab) {
@@ -991,9 +1124,11 @@ function storeAndShowMessage(uid, msgObj) {
     chatTabs.set(uid, tab);
   }
   if (msgObj.id && tab.messages.some(m => m.id === msgObj.id)) return;
+  // Default status for outgoing messages loaded from server/history
+  if (msgObj.me && !msgObj.status) msgObj.status = 'delivered';
   tab.messages.push(msgObj);
   persistChatTabs();
-  if (activePeerKey() === uid) appendMessageEl(msgObj.text, msgObj.me, msgObj.sender, msgObj.time);
+  if (activePeerKey() === uid) appendMessageEl(msgObj.text, msgObj.me, msgObj.sender, msgObj.time, msgObj.id, msgObj.status);
   renderSidebar();
 }
 
@@ -1018,7 +1153,7 @@ function fetchChatHistoryFromServer(uid) {
       if (!text) return;
       if (m.id) ids.add(m.id);
       const me = (m.sender === myHiddenId);
-      tab.messages.push({ id: m.id, text, sender: m.sender, time: m.time, me });
+      tab.messages.push({ id: m.id, text, sender: m.sender, time: m.time, me, status: me ? 'delivered' : undefined });
     });
     tab.messages.sort((a, b) => {
       const ta = (a && a.time) ? String(a.time) : '';
@@ -1098,7 +1233,7 @@ function selectPeer(peer) {
   const tab = chatTabs.get(key);
   (tab?.messages || []).forEach(m => {
     if (m.fileMsg) appendFileMessageEl(m.fileMsg, m.me);
-    else appendMessageEl(m.text, m.me, m.sender);
+    else appendMessageEl(m.text, m.me, m.sender, m.time, m.id, m.status);
   });
 
   msgInput.disabled = !socket?.connected;
@@ -1109,6 +1244,8 @@ function selectPeer(peer) {
   }
 
   fetchChatHistoryFromServer(key);
+  // If we opened a DM with someone, mark incoming messages as "read"
+  sendReadReceiptsForActiveChat();
   updateJoinCallBanner();
   renderSidebar();
 }
@@ -1478,7 +1615,7 @@ function sendMessage() {
   if (!socket || !socket.connected) { toast('Нет подключения к серверу'); return; }
 
   const msgId = 'm_' + Date.now() + '_' + Math.random().toString(36).slice(2);
-  const msgObj = { id: msgId, text, me: true, sender: myHiddenId, time: timeStr() };
+  const msgObj = { id: msgId, text, me: true, sender: myHiddenId, time: timeStr(), status: 'pending' };
   const peerKey = activePeer.hiddenId || activePeer.userId;
   const tab = chatTabs.get(peerKey);
   if (tab) { tab.messages.push(msgObj); persistChatTabs(); }
@@ -1487,8 +1624,10 @@ function sendMessage() {
   try { ciphertext = btoa(JSON.stringify({ text, id: msgId })); } catch { ciphertext = ''; }
   const ivBytes = new Uint8Array(12);
   const iv = btoa(String.fromCharCode(...ivBytes));
-  socket?.emit?.('chat-send', { roomType: 'dm', roomId: peerKey, to: peerKey, ciphertext, iv });
-  appendMessageEl(text, true, myHiddenId);
+  socket?.emit?.('chat-send', { roomType: 'dm', roomId: peerKey, to: peerKey, ciphertext, iv, clientMsgId: msgId }, (ack) => {
+    if (ack?.ok) setMessageStatus(peerKey, msgId, 'delivered');
+  });
+  appendMessageEl(text, true, myHiddenId, msgObj.time, msgId, msgObj.status);
   msgInput.value = '';
   msgInput.style.height = 'auto';
 }
@@ -1601,14 +1740,15 @@ function renderMessages(uid) {
   const tab = chatTabs.get(uid);
   (tab?.messages || []).forEach(m => {
     if (m.fileMsg) appendFileMessageEl(m.fileMsg, m.me);
-    else appendMessageEl(m.text, m.me, m.sender, m.time);
+    else appendMessageEl(m.text, m.me, m.sender, m.time, m.id, m.status);
   });
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
-function appendMessageEl(text, isMe, sender, time) {
+function appendMessageEl(text, isMe, sender, time, msgId, status) {
   const div = document.createElement('div');
   div.className = 'msg' + (isMe ? ' me' : '');
+  if (msgId) div.dataset.msgId = String(msgId);
 
   let avatarHtml;
   if (isMe) {
@@ -1630,11 +1770,14 @@ function appendMessageEl(text, isMe, sender, time) {
     }
   }
 
+  const effStatus = isMe ? (normalizeMsgStatus(status) || 'delivered') : null;
+  const statusHtml = isMe ? `<span class="msg-status">${escapeHtml(statusGlyph(effStatus))}</span>` : '';
+
   div.innerHTML = `
     <div class="msg-av">${avatarHtml}</div>
     <div class="msg-body">
       <div class="msg-bubble">${escapeHtml(text)}</div>
-      <div class="msg-meta">${escapeHtml(time || timeStr())}</div>
+      <div class="msg-meta">${escapeHtml(time || timeStr())}${statusHtml}</div>
     </div>
   `;
   messagesEl.appendChild(div);
