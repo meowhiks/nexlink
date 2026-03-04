@@ -25,6 +25,7 @@ let mediaRelayRoom     = null;      // current call room id
 let mediaRelayRecorder = null;      // MediaRecorder sending our stream
 let mediaRelayMimeType = null;      // mime used for recording
 let remoteRelayPlayers = {};        // hiddenId → RelayPlayer
+let currentCallMembers = [];        // [{ hiddenId, nickname, avatarUrl }]
 let isChunkFirst       = true;      // track first chunk (init segment)
 
 /* ── Chat / peers ───────────────────────────────────────────── */
@@ -871,6 +872,10 @@ async function connectToServer() {
         remoteRelayPlayers[hiddenId].destroy();
         delete remoteRelayPlayers[hiddenId];
       }
+    if (roomId && currentCallMembers?.length) {
+      currentCallMembers = currentCallMembers.filter(m => (m.hiddenId || m.userId) !== hiddenId);
+      updateJoinCallBanner();
+    }
     });
 
     /* ── FILE TRANSFER ────────────────────────────────────────── */
@@ -1315,6 +1320,13 @@ async function joinPeerCall() {
   if (roomId) {
     mediaRelayRoom = roomId;
     socket.emit('relay-join', { roomId });
+    // запросить у сервера полный список участников
+    socket.emit('relay-room-members', { roomId }, (members) => {
+      if (Array.isArray(members)) {
+        currentCallMembers = members;
+        updateJoinCallBanner();
+      }
+    });
     try {
       localStream = await getMediaStream('video');
     } catch {
@@ -1379,10 +1391,32 @@ function updateJoinCallBanner() {
   const show = !!(activePeer && peer?.inCall);
   banner.classList.toggle('hidden', !show);
   if (show && avatarEl) {
-    const av = resolveAvatarUrl(peer?.avatarUrl);
-    avatarEl.innerHTML = av
-      ? `<img src="${escapeHtml(av)}" alt="">`
-      : initials(peerDisplayName(peer || activePeer));
+    // Render all participants pills (including self if в комнате)
+    const pills = [];
+    const members = Array.isArray(currentCallMembers) ? currentCallMembers : [];
+    const seen = new Set();
+    members.forEach(m => {
+      const hid = m.hiddenId || m.userId;
+      if (!hid || seen.has(hid)) return;
+      seen.add(hid);
+      const av = resolveAvatarUrl(m.avatarUrl);
+      const label = m.nickname || lookupName(hid);
+      pills.push(
+        av
+          ? `<div class="pill"><img src="${escapeHtml(av)}" alt="${escapeHtml(label)}"></div>`
+          : `<div class="pill">${initials(label)}</div>`
+      );
+    });
+    // Если сервер пока не вернул список — хотя бы показать собеседника
+    if (!pills.length && peer) {
+      const av = resolveAvatarUrl(peer.avatarUrl);
+      pills.push(
+        av
+          ? `<div class="pill"><img src="${escapeHtml(av)}" alt="${escapeHtml(peerDisplayName(peer))}"></div>`
+          : `<div class="pill">${initials(peerDisplayName(peer))}</div>`
+      );
+    }
+    avatarEl.innerHTML = pills.join('');
   }
 }
 
