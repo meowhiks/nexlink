@@ -63,17 +63,19 @@ async function decrypt(key, ciphertext, iv) {
 }
 
 function decodeLegacyPayload(ciphertext, iv) {
+  if (!ciphertext || typeof ciphertext !== 'string') return null;
+  const raw = atob(ciphertext.replace(/\s/g, ''));
+  if (!raw) return null;
   try {
-    // Old format (ASCII-safe): base64(JSON string)
-    const decoded = atob(ciphertext || '');
+    // New format (UTF-8 safe): base64(utf8 bytes of JSON string) — try first
+    const bytes = Uint8Array.from(raw, c => c.charCodeAt(0));
+    const decoded = new TextDecoder('utf-8').decode(bytes);
     const json = JSON.parse(decoded);
     if (json && typeof json.text === 'string') return { text: json.text, id: json.id };
   } catch {}
   try {
-    // New format (UTF-8 safe): base64(utf8 bytes of JSON string)
-    const bytes = Uint8Array.from(atob(ciphertext || ''), c => c.charCodeAt(0));
-    const decoded = new TextDecoder().decode(bytes);
-    const json = JSON.parse(decoded);
+    // Fallback: legacy ASCII-only base64(JSON)
+    const json = JSON.parse(raw);
     if (json && typeof json.text === 'string') return { text: json.text, id: json.id };
   } catch {}
   return null;
@@ -83,10 +85,7 @@ function encodeLegacyPayload(obj) {
   const enc = new TextEncoder();
   const bytes = enc.encode(JSON.stringify(obj || {}));
   let bin = '';
-  const CHUNK = 0x8000;
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-  }
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
   return btoa(bin);
 }
 

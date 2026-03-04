@@ -69,9 +69,9 @@ async function startSignalingServer({ port = 3000, logger = console, staticDir =
   io.on('connection', (socket) => {
     logger.log(`[signaling] connect ${socket.id}`);
 
-    socket.on('register', ({ userId, radminIp, identityPublicKey, sessionToken, nickname, avatarUrl, inCall }) => {
+    socket.on('register', ({ userId, hiddenId, radminIp, identityPublicKey, sessionToken, nickname, avatarUrl, inCall }) => {
       if (!userId) return;
-      peers.set(socket.id, { userId, radminIp, socketId: socket.id, identityPublicKey, sessionToken, nickname, avatarUrl, inCall: !!inCall });
+      peers.set(socket.id, { userId, hiddenId: hiddenId || userId, radminIp, socketId: socket.id, identityPublicKey, sessionToken, nickname, avatarUrl, inCall: !!inCall });
       logger.log(`[signaling] registered ${userId} (${nickname || 'no-nick'}) @ ${radminIp}`);
       broadcastPeers(io, peers);
     });
@@ -81,6 +81,7 @@ async function startSignalingServer({ port = 3000, logger = console, staticDir =
       if (p) { p.inCall = !!inCall; broadcastPeers(io, peers); }
     });
 
+    // Legacy: plaintext store (kept for compatibility)
     socket.on('chat-store', ({ to, from, text, time, sender, id }) => {
       if (!to || !from || !text) return;
       const key = roomKey(from, to);
@@ -91,12 +92,107 @@ async function startSignalingServer({ port = 3000, logger = console, staticDir =
       if (arr.length > 500) arr.splice(0, arr.length - 500);
     });
 
-    socket.on('chat-history', ({ with: peerUserId }, cb) => {
+    function findPeerByHiddenId(hiddenId) {
+      for (const [, peer] of peers) {
+        if (peer.hiddenId === hiddenId) return peer;
+      }
+      return null;
+    }
+
+    // New: chat-send (ciphertext/iv), chat-history compatible with central server
+    socket.on('chat-send', ({ roomType, roomId, ciphertext, iv, to, clientMsgId } = {}, cb) => {
+      try {
+        const me = peers.get(socket.id);
+        if (!me?.hiddenId) {
+          if (typeof cb === 'function') cb({ ok: false, error: 'not_online' });
+          return;
+        }
+        const senderHiddenId = me.hiddenId;
+        const peerHiddenId = to || roomId;
+        if (!peerHiddenId || !ciphertext || !iv) {
+          if (typeof cb === 'function') cb({ ok: false, error: 'bad_request' });
+          return;
+        }
+        const key = roomKey(senderHiddenId, peerHiddenId);
+        if (!chatRooms.has(key)) chatRooms.set(key, []);
+        const arr = chatRooms.get(key);
+        const serverId = `s_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        arr.push({
+          id: serverId,
+          roomType: 'dm',
+          roomId: key,
+          sender: senderHiddenId,
+          senderHiddenId,
+          peerHiddenId,
+          ciphertext,
+          iv,
+          time: new Date().toISOString(),
+        });
+        if (arr.length > 500) arr.splice(0, arr.length - 500);
+        io.emit('chat-new', {
+          id: serverId,
+          roomType: 'dm',
+          roomId: key,
+          sender: senderHiddenId,
+          senderHiddenId,
+          peerHiddenId,
+          ciphertext,
+          iv,
+          time: new Date().toISOString(),
+        });
+        if (typeof cb === 'function') cb({ ok: true, clientMsgId: clientMsgId || null, time: new Date().toISOString() });
+      } catch (e) {
+        if (typeof cb === 'function') cb({ ok: false, error: 'server_error' });
+      }
+    });
+
+    socket.on('chat-history', ({ roomType, roomId, with: peerHiddenId } = {}, cb) => {
       const me = peers.get(socket.id);
-      if (!me || !peerUserId || typeof cb !== 'function') return cb?.([]);
-      const key = roomKey(me.userId, peerUserId);
+      if (!me || !me.hiddenId || typeof cb !== 'function') return cb?.([]);
+      const other = peerHiddenId || roomId;
+      if (!other) return cb([]);
+      const key = roomKey(me.hiddenId, other);
       const arr = chatRooms.get(key) || [];
-      cb(arr);
+      // Normalize legacy plaintext entries to match newer shape if needed
+      const out = arr.map(m => {
+        if (m && m.ciphertext) return m;
+        if (!m || !m.text) return null;
+        const msgId = m.id || `m_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        const ciphertext = Buffer.from(JSON.stringify({ text: m.text, id: msgId }), 'utf8').toString('base64');
+        const iv = Buffer.alloc(12, 0).toString('base64');
+        return {
+          id: msgId,
+          roomType: 'dm',
+          roomId: key,
+          sender: m.sender || m.from,
+          senderHiddenId: m.sender || m.from,
+          peerHiddenId: m.to || other,
+          ciphertext,
+          iv,
+          time: m.time || new Date().toISOString(),
+        };
+      }).filter(Boolean);
+      cb(out);
+    });
+
+    socket.on('chat-read', ({ peerHiddenId, messageIds } = {}, cb) => {
+      try {
+        const me = peers.get(socket.id);
+        if (!me?.hiddenId) {
+          if (typeof cb === 'function') cb({ ok: false, error: 'not_online' });
+          return;
+        }
+        const target = findPeerByHiddenId(peerHiddenId);
+        const ids = Array.isArray(messageIds) ? messageIds.filter(Boolean).slice(0, 500) : [];
+        if (!target || ids.length === 0) {
+          if (typeof cb === 'function') cb({ ok: false, delivered: false });
+          return;
+        }
+        io.to(target.socketId).emit('chat-read', { roomType: 'dm', peerHiddenId: me.hiddenId, messageIds: ids, time: new Date().toISOString() });
+        if (typeof cb === 'function') cb({ ok: true, delivered: true });
+      } catch {
+        if (typeof cb === 'function') cb({ ok: false, error: 'server_error' });
+      }
     });
 
     socket.on('offer', ({ to, offer, from }) => {

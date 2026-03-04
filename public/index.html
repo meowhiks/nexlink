@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NexLink — P2P Messenger</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Syne:wght@700;800&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@300;400;500;600;700&family=Manrope:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Syne:wght@700;800&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" crossorigin="anonymous" />
   <style>
     /* ── RESET ─────────────────────────────────────── */
@@ -49,7 +49,7 @@
       --text-20:  rgba(255,255,255,0.18);
 
       /* Type */
-      --font-ui:   'Manrope', -apple-system, sans-serif;
+      --font-ui:   'Comfortaa', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
       --font-mono: 'JetBrains Mono', monospace;
       --font-logo: 'Syne', sans-serif;
 
@@ -831,36 +831,43 @@
       margin: 0 2px;
     }
 
-    /* Join call banner */
+    /* Join call: avatar + phone icon */
     .join-call-banner {
-      display: flex; align-items: center; gap: 8px;
+      display: flex; align-items: center; gap: 6px;
       background: var(--green-dim);
       border: 1px solid rgba(45,216,120,0.2);
-      border-radius: var(--radius-pill);
-      padding: 5px 12px 5px 8px;
-      font-size: 12px;
-      color: var(--green);
-      font-weight: 600;
-    }
-    .join-call-banner.hidden { display: none !important; }
-    .join-call-btn {
-      padding: 4px 10px;
-      background: var(--green);
-      color: #000;
-      border: none;
-      border-radius: var(--radius-pill);
-      font-size: 11px; font-weight: 700;
+      border-radius: 50px;
+      padding: 4px 10px 4px 4px;
       cursor: pointer;
-      display: flex; align-items: center; gap: 4px;
-      font-family: var(--font-ui);
       transition: all 0.15s;
     }
-    .join-call-btn:hover { filter: brightness(1.1); }
+    .join-call-banner:hover { background: rgba(45,216,120,0.25); filter: brightness(1.05); }
+    .join-call-banner.hidden { display: none !important; }
+    .join-call-avatar {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      background: var(--bg-active);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 700; color: var(--text-80);
+      overflow: hidden; flex-shrink: 0;
+    }
+    .join-call-avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .join-call-icon-wrap {
+      width: 26px; height: 26px;
+      border-radius: 50%;
+      background: var(--green);
+      color: #000;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px;
+    }
 
     /* ── MESSAGES ──────────────────────────────────── */
     #messages {
       flex: 1;
       overflow-y: auto;
+      overflow-x: hidden;
+      overscroll-behavior-x: none;
+      touch-action: pan-y;
       padding: 16px 18px;
       display: flex; flex-direction: column; gap: 2px;
     }
@@ -924,7 +931,8 @@
       font-family: var(--font-mono);
     }
     .msg-group.me .msg-meta { color: rgba(255,255,255,0.5); }
-    .msg-status { font-size: 11px; }
+    .msg-status-wrap { margin-left: 4px; display:inline-flex; align-items:center; }
+    .msg-status-icon { font-size: 10px; opacity: 0.9; }
 
     .msg-system {
       align-self: center;
@@ -1612,13 +1620,10 @@
           <div class="chat-header-status" id="chat-peer-sub">в сети</div>
         </div>
         <div class="chat-header-actions">
-          <!-- Join call banner -->
-          <div id="join-call-banner" class="join-call-banner hidden">
-            <i class="fas fa-circle" style="font-size:7px; animation: pulse-dot 1.5s ease-in-out infinite;"></i>
-            <span>Звонок</span>
-            <button class="join-call-btn" onclick="joinPeerCall()">
-              <i class="fas fa-phone"></i> Войти
-            </button>
+          <!-- Join call: avatar + call icon (click to join) -->
+          <div id="join-call-banner" class="join-call-banner hidden" onclick="joinPeerCall()" title="Войти в звонок">
+            <div class="join-call-avatar" id="join-call-avatar"></div>
+            <div class="join-call-icon-wrap"><i class="fas fa-phone"></i></div>
           </div>
           <div class="header-sep"></div>
           <button class="header-btn" id="audio-call-btn" onclick="startCall('audio')" title="Аудиозвонок">
@@ -1793,6 +1798,14 @@
       <div class="form-group">
         <label class="form-label">Имя пользователя</label>
         <input class="inp" id="username-inp" placeholder="Введите имя" value="User" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Никнейм</label>
+        <input class="inp" id="handle-inp" placeholder="@meowhiks_abcd" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">О себе</label>
+        <textarea class="inp" id="bio-inp" rows="3" placeholder="Расскажите о себе"></textarea>
       </div>
       <div class="btn-group">
         <button class="btn" onclick="closeProfileModal()">Отмена</button>

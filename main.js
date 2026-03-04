@@ -227,7 +227,9 @@ app.on('before-quit', async () => {
 
 // ── Config helpers ────────────────────────────────────────────
 function getConfigPath() {
-  return path.join(app.getPath('userData'), 'config.json');
+  // Store config locally in ./data so that each app folder copy
+  // has its own identity and settings (convenient for testing)
+  return path.join(__dirname, 'data', 'config.json');
 }
 
 async function readConfig() {
