@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NexLink — Демонстрация</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    :root {
+      --bg-primary: #0a0a0c;
+      --text: #e8e8ed;
+      --accent: #5B9CF6;
+      --red: #ef4444;
+    }
+    body {
+      background: var(--bg-primary);
+      color: var(--text);
+      font-family: system-ui, -apple-system, sans-serif;
+      overflow: hidden;
+      user-select: none;
+    }
+    #frame {
+      width: 100%;
+      height: 100vh;
+      object-fit: contain;
+      background: #000;
+      display: block;
+    }
+    #top {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 34px;
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      background: rgba(0,0,0,0.45);
+      backdrop-filter: blur(8px);
+      -webkit-app-region: drag;
+      z-index: 2;
+      font-size: 13px;
+    }
+    #top span { opacity: 0.9; }
+    #controls {
+      position: fixed;
+      right: 12px;
+      bottom: 12px;
+      display: flex;
+      gap: 10px;
+      -webkit-app-region: no-drag;
+      z-index: 3;
+      opacity: 0;
+      transform: translateY(6px);
+      transition: opacity 0.18s, transform 0.18s;
+    }
+    body:hover #controls {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    .btn {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-size: 18px;
+      background: rgba(255,255,255,0.14);
+      backdrop-filter: blur(10px);
+      transition: all 0.16s;
+    }
+    .btn:hover { background: rgba(255,255,255,0.22); transform: scale(1.05); }
+    .btn.full { background: rgba(91,156,246,0.85); }
+    .btn.close { background: rgba(239,68,68,0.9); }
+  </style>
+</head>
+<body>
+  <div id="top"><span>NexLink — Демонстрация экрана</span></div>
+  <img id="frame" alt="screen" />
+  <div id="controls">
+    <button class="btn full" id="fs" title="Полный экран"><i class="fas fa-expand"></i></button>
+    <button class="btn close" id="close" title="Закрыть"><i class="fas fa-xmark"></i></button>
+  </div>
+  <script>
+    const img = document.getElementById('frame');
+    const fsBtn = document.getElementById('fs');
+    const closeBtn = document.getElementById('close');
+    if (window.electronAPI?.screenShare) {
+      window.electronAPI.screenShare.onFrame((dataUrl) => {
+        if (dataUrl) img.src = dataUrl;
+      });
+      fsBtn?.addEventListener('click', () => window.electronAPI.screenShare.toggleFullscreen());
+      closeBtn?.addEventListener('click', () => window.electronAPI.screenShare.close());
+    }
+  </script>
+</body>
+</html>
+

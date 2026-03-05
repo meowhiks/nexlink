@@ -13,6 +13,7 @@ const { spawn } = require('child_process');
 
 let mainWindow = null;
 let callOverlayWindow = null;
+let screenShareWindow = null;
 let serverProcess = null;
 
 // ── LAN discovery (UDP) ───────────────────────────────────────
@@ -155,6 +156,14 @@ function closeCallOverlayWindow() {
   mainWindow?.webContents?.send?.('call-overlay-closed');
 }
 
+function closeScreenShareWindow() {
+  if (screenShareWindow && !screenShareWindow.isDestroyed()) {
+    screenShareWindow.close();
+    screenShareWindow = null;
+  }
+  mainWindow?.webContents?.send?.('screen-share-closed');
+}
+
 function createCallOverlayWindow() {
   if (callOverlayWindow && !callOverlayWindow.isDestroyed()) {
     callOverlayWindow.focus();
@@ -196,6 +205,45 @@ function createCallOverlayWindow() {
   });
 
   mainWindow?.webContents?.send?.('call-overlay-opened');
+}
+
+function createScreenShareWindow() {
+  if (screenShareWindow && !screenShareWindow.isDestroyed()) {
+    screenShareWindow.focus();
+    return;
+  }
+  screenShareWindow = new BrowserWindow({
+    width: 860,
+    height: 520,
+    minWidth: 420,
+    minHeight: 280,
+    frame: true,
+    titleBarStyle: 'default',
+    transparent: false,
+    backgroundColor: '#0a0a0c',
+    alwaysOnTop: false,
+    resizable: true,
+    minimizable: true,
+    maximizable: true,
+    fullscreenable: true,
+    parent: null,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload-screen-share.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+    show: false,
+  });
+
+  screenShareWindow.setMenuBarVisibility(false);
+  screenShareWindow.setTitle('NexLink — Демонстрация');
+  screenShareWindow.loadFile(path.join(__dirname, 'public', 'screen-share.html'));
+  screenShareWindow.once('ready-to-show', () => screenShareWindow.show());
+  screenShareWindow.on('closed', () => {
+    screenShareWindow = null;
+    mainWindow?.webContents?.send?.('screen-share-closed');
+  });
+  mainWindow?.webContents?.send?.('screen-share-opened');
 }
 
 app.whenReady().then(() => {
@@ -247,7 +295,17 @@ async function readConfig() {
 async function writeConfig(cfg) {
   const filePath = getConfigPath();
   await fsp.mkdir(path.dirname(filePath), { recursive: true });
-  const payload = (cfg && typeof cfg === 'object') ? cfg : {};
+  const patch = (cfg && typeof cfg === 'object') ? cfg : {};
+  // Merge patch into existing config to preserve identity and other internal fields
+  let existing = {};
+  try {
+    const raw = await fsp.readFile(filePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') existing = parsed;
+  } catch (err) {
+    if (err?.code !== 'ENOENT') console.error('writeConfig(readExisting):', err);
+  }
+  const payload = { ...existing, ...patch };
   await fsp.writeFile(filePath, JSON.stringify(payload, null, 2), 'utf8');
 }
 
@@ -424,4 +482,16 @@ ipcMain.on('call-overlay-capture', async (_e, { x, y, width, height } = {}) => {
 ipcMain.on('call-overlay-fullscreen', () => {
   if (!callOverlayWindow || callOverlayWindow.isDestroyed()) return;
   callOverlayWindow.setFullScreen(!callOverlayWindow.isFullScreen());
+});
+
+// ── IPC: Screen share pop-out ─────────────────────────────────
+ipcMain.on('screen-share-open', () => createScreenShareWindow());
+ipcMain.on('screen-share-close', () => closeScreenShareWindow());
+ipcMain.on('screen-share-frame', (_e, dataUrl) => {
+  if (!screenShareWindow || screenShareWindow.isDestroyed()) return;
+  screenShareWindow.webContents.send('screen-share-frame', dataUrl);
+});
+ipcMain.on('screen-share-fullscreen', () => {
+  if (!screenShareWindow || screenShareWindow.isDestroyed()) return;
+  screenShareWindow.setFullScreen(!screenShareWindow.isFullScreen());
 });

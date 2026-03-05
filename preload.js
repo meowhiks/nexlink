@@ -60,4 +60,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('call-overlay-closed', handler);
     return () => ipcRenderer.off('call-overlay-closed', handler);
   },
+  // Screen share pop-out
+  openScreenShare:  () => ipcRenderer.send('screen-share-open'),
+  closeScreenShare: () => ipcRenderer.send('screen-share-close'),
+  sendScreenShareFrame: (dataUrl) => ipcRenderer.send('screen-share-frame', dataUrl),
+  onScreenShareOpened: (cb) => {
+    if (typeof cb !== 'function') return () => {};
+    const handler = () => cb();
+    ipcRenderer.on('screen-share-opened', handler);
+    return () => ipcRenderer.off('screen-share-opened', handler);
+  },
+  onScreenShareClosed: (cb) => {
+    if (typeof cb !== 'function') return () => {};
+    const handler = () => cb();
+    ipcRenderer.on('screen-share-closed', handler);
+    return () => ipcRenderer.off('screen-share-closed', handler);
+  },
 });

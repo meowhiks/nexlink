@@ -2,7 +2,8 @@ server/
 node_modules/
 *.zip
 *.md
-SubChatTitle/
+data/
+nexlink/
 
 # Logs
 logs
